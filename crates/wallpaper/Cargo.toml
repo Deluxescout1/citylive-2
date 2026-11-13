@@ -1,0 +1,29 @@
+[package]
+name = "wallpaper"
+description = "CityLive Iso live wallpaper on KDE Plasma 6 Wayland"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "citylive-iso"
+path = "src/main.rs"
+
+[features]
+# Live weather (B27): pulls the pure-Rust HTTPS client through `present`.
+default = ["net"]
+net = ["present/net"]
+
+[dependencies]
+present = { path = "../present" }
+locate = { path = "../locate" }
+update = { path = "../update" }
+render = { path = "../render" }
+map = { path = "../map" }
+sim = { path = "../sim" }
+weather_fx = { path = "../weather_fx" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+libc = "0.2"

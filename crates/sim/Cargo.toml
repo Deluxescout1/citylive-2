@@ -1,0 +1,10 @@
+[package]
+name = "sim"
+description = "CityLive Iso growth simulation: founding, lanes, lots, construction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+map = { path = "../map" }

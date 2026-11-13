@@ -1,0 +1,8 @@
+{
+  "name": "CityLive Iso Wallpaper",
+  "description": "Integrates CityLive Iso live wallpaper into GNOME Shell background layer",
+  "uuid": "citylive-iso@citylive.org",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "url": "https://citylive.org",
+  "version": 1
+}

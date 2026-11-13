@@ -1,0 +1,48 @@
+[package]
+name = "present"
+description = "CityLive Iso layer-shell presentation backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+buildkit = { path = "../buildkit" }
+render = { path = "../render" }
+map = { path = "../map" }
+sim = { path = "../sim" }
+transitview = { path = "../transitview" }
+endfx = { path = "../endfx" }
+wildlife = { path = "../wildlife" }
+sky = { path = "../sky" }
+world = { path = "../world" }
+locate = { path = "../locate" }
+update = { path = "../update" }
+weather_fx = { path = "../weather_fx" }
+bytemuck = "1.25"
+log = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2"
+zbus = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi",
+  "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader",
+  "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation",
+  "Win32_System_Time", "Win32_System_Registry", "Win32_System_Power", "Win32_System_Console",
+  "Win32_System_SystemServices", "Win32_Globalization", "Win32_Storage_FileSystem",
+  "Win32_UI_Accessibility", "Win32_Security", "Win32_System_RemoteDesktop",
+  "Win32_Graphics_Dwm", "Win32_System_Diagnostics_ToolHelp", "Win32_Media", "Win32_System_Pipes", "Win32_System_IO",
+] }
+
+[features]
+# Live weather needs the pure-Rust HTTPS client in `world` (B27 item 1).
+net = ["world/net", "locate/net", "update/net"]

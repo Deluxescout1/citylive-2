@@ -1,0 +1,23 @@
+[package]
+name = "world"
+description = "CityLive Iso world logic: real sun/moon, Open-Meteo weather, IP location, holidays and seasons. Ported from old CityLive city.js."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure-Rust TLS for the `net` feature (B27 item 1): rustls with the RustCrypto
+# provider and a bundled root store, so a static musl build needs **no C
+# compiler** (ureq+ring did: `x86_64-linux-musl-gcc: No such file or directory`).
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
+rustls-rustcrypto = { version = "0.1.0-pre.0", optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+[features]
+# Networking (IP geolocation, weather). OFF by default so a plain build stays
+# tiny; `net` adds ~1.5 MB and builds with no C toolchain on musl.
+default = []
+net = ["dep:rustls", "dep:rustls-rustcrypto", "dep:webpki-roots"]

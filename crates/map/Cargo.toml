@@ -1,0 +1,9 @@
+[package]
+name = "map"
+description = "CityLive Iso world data: tiles, seeded terrain generation, viewport maths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

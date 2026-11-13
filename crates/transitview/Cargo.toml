@@ -1,0 +1,11 @@
+[package]
+name = "transitview"
+description = "The sim's transport in the renderer's form (B58): one conversion for the wallpaper, the spike and the shot tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+render = { path = "../render" }
+sim = { path = "../sim" }

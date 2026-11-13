@@ -1,0 +1,27 @@
+[package]
+name = "settings"
+description = "CityLive Iso settings window (B37/M10): the config file with a live preview"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "citylive-iso-settings"
+path = "src/main.rs"
+
+[dependencies]
+present = { path = "../present" }
+world = { path = "../world", features = ["net"] }
+locate = { path = "../locate", features = ["net"] }
+update = { path = "../update", features = ["net"] }
+eframe = { version = "0.32", default-features = false, features = ["glow", "default_fonts"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+# Windows: a VM or an old machine may have no OpenGL 2+ driver, so the window
+# can also be drawn with wgpu (Direct3D 12, falling back to the software WARP
+# adapter that ships with Windows). The first try is still GL; see `run()`.
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["glow", "wgpu", "default_fonts"] }

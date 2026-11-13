@@ -1,0 +1,12 @@
+[package]
+name = "endfx"
+description = "CityLive Iso: the glue between the sim's world ending and the renderer (B50)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+map = { path = "../map" }
+sim = { path = "../sim" }
+render = { path = "../render" }

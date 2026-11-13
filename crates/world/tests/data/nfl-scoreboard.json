@@ -1,0 +1,89 @@
+{
+  "leagues": [
+    {
+      "id": "49",
+      "name": "National Football League",
+      "abbreviation": "NFL"
+    }
+  ],
+  "events": [
+    {
+      "id": "401762001",
+      "name": "Buffalo Bills at New England Patriots",
+      "date": "2026-11-09T13:00:00Z",
+      "season": "2026",
+      "status": {
+        "type": {
+          "state": "in",
+          "detail": "1st 12:34",
+          "shortDetail": "1st 12:34"
+        }
+      },
+      "competitions": [
+        {
+          "competitors": [
+            {
+              "homeAway": "away",
+              "score": "7",
+              "team": {
+                "id": 19,
+                "name": "Buffalo Bills",
+                "location": "Buffalo",
+                "abbreviation": "BUF"
+              }
+            },
+            {
+              "homeAway": "home",
+              "score": "10",
+              "team": {
+                "id": 3,
+                "name": "New England Patriots",
+                "location": "Foxborough",
+                "abbreviation": "NE"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "401762002",
+      "name": "Kansas City Chiefs at Miami Dolphins",
+      "date": "2026-11-09T13:20:00Z",
+      "season": "2026",
+      "status": {
+        "type": {
+          "state": "pre",
+          "detail": "Pre-Game",
+          "shortDetail": "Pre-Game"
+        }
+      },
+      "competitions": [
+        {
+          "competitors": [
+            {
+              "homeAway": "away",
+              "score": "0",
+              "team": {
+                "id": 15,
+                "name": "Kansas City Chiefs",
+                "location": "Kansas City",
+                "abbreviation": "KC"
+              }
+            },
+            {
+              "homeAway": "home",
+              "score": "0",
+              "team": {
+                "id": 12,
+                "name": "Miami Dolphins",
+                "location": "Miami Gardens",
+                "abbreviation": "MIA"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

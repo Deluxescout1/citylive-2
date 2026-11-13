@@ -1,0 +1,23 @@
+[package]
+name = "present_gnome"
+description = "CityLive Iso GNOME Wayland desktop presentation backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "citylive-iso-gnome"
+path = "src/main.rs"
+
+[dependencies]
+endfx = { path = "../endfx" }
+render = { path = "../render" }
+map = { path = "../map" }
+sim = { path = "../sim" }
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+bytemuck = "1.25"
+libc = "0.2"
+log = "0.4"

@@ -1,0 +1,64 @@
+{
+  "atm": 29.92,
+  "count": 4,
+  "ac": [
+    {
+      "hex": "a1b2c3",
+      "r": "DAL1234",
+      "flight": "DAL1234",
+      "t": "A320N",
+      "category": "A3A",
+      "lat": 51.4934,
+      "lon": 0.0098,
+      "baro_alt": "320.5",
+      "alt_baro": 340.2,
+      "gs": 152.4,
+      "squawk": "4021",
+      "track": 90.0,
+      "baro_rate": -300,
+      "dir": 45.2,
+      "dst": 0.42
+    },
+    {
+      "hex": "d4e5f6",
+      "r": "AAL777",
+      "flight": "AAL777",
+      "t": "B744",
+      "category": "A5A",
+      "lat": 51.452,
+      "lon": -0.0507,
+      "baro_alt": "118.9",
+      "alt_baro": 120.0,
+      "gs": 98.0,
+      "squawk": "1200",
+      "track": 277.5,
+      "baro_rate": 80,
+      "dir": 200.0,
+      "dst": 2.1
+    },
+    {
+      "hex": "0a1b2c",
+      "r": "CED61",
+      "t": "C172",
+      "category": "A1A",
+      "lat": 51.564,
+      "lon": 0.1102,
+      "alt_baro": "ground",
+      "gs": 0,
+      "track": 0,
+      "dir": 10.0,
+      "dst": 5.5
+    },
+    {
+      "hex": "ffee11",
+      "r": "M215",
+      "t": "M21",
+      "category": "A1A",
+      "lat": 51.513,
+      "lon": 0.0012,
+      "gs": 40.0,
+      "track": 180.0,
+      "baro_rate": 0
+    }
+  ]
+}

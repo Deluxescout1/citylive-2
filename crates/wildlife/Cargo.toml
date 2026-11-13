@@ -1,0 +1,11 @@
+[package]
+name = "wildlife"
+description = "CityLive Iso wildlife layer (B22, D44): cheap, deterministic animals driven by the map"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+map = { path = "../map" }
+render = { path = "../render" }

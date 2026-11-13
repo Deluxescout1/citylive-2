@@ -1,0 +1,16 @@
+[package]
+name = "artspike"
+description = "B25 art-detail spike: 32-px @2x vs 64-px @1x iso city scene + cost measurements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "citylive-artspike"
+path = "src/main.rs"
+
+[dependencies]
+render = { path = "../render" }
+map = { path = "../map" }
+png = "0.18"

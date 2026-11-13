@@ -1,0 +1,11 @@
+[package]
+name = "sky"
+description = "CityLive Iso sky layer (B12): time-of-day sky + scene light look from (datetime, lat, lon), built on `world`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+world = { path = "../world" }
+render = { path = "../render" }

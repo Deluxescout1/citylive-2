@@ -1,0 +1,12 @@
+[package]
+name = "weather_fx"
+description = "CityLive Iso weather overlays (B14): rain, snow, fog, cloud shadows and lightning drawn on top of a finished frame, driven by world::Weather"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+render = { path = "../render" }
+world = { path = "../world" }
+map = { path = "../map" }

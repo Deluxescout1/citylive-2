@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/artspike", "crates/buildkit", "crates/endfx", "crates/locate", "crates/map", "crates/present", "crates/present_gnome", "crates/present_x11", "crates/render", "crates/settings", "crates/sim", "crates/sky", "crates/spike", "crates/transitview", "crates/update", "crates/wallpaper", "crates/weather_fx", "crates/wildlife", "crates/world"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

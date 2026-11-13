@@ -1,0 +1,26 @@
+[package]
+name = "spike"
+description = "CityLive Iso M0 tech spike: PNG / windowed / bench modes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "citylive-iso-spike"
+path = "src/main.rs"
+
+[dependencies]
+buildkit = { path = "../buildkit" }
+render = { path = "../render" }
+map = { path = "../map" }
+sim = { path = "../sim" }
+transitview = { path = "../transitview" }
+endfx = { path = "../endfx" }
+wildlife = { path = "../wildlife" }
+sky = { path = "../sky" }
+weather_fx = { path = "../weather_fx" }
+world = { path = "../world" }
+winit = "0.30"
+softbuffer = "0.4"
+png = "0.18"

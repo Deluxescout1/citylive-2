@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CityLive Iso
+Comment=CityLive Iso Live Wallpaper
+Exec=citylive-iso-gnome
+Icon=image-x-generic
+Terminal=false
+NoDisplay=true
+Categories=Utility;

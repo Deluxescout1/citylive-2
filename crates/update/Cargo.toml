@@ -1,0 +1,18 @@
+[package]
+name = "update"
+description = "Citylive 2 auto-update (B97): GitHub Releases check, SHA-256 verified staging, apply at the next start"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+world = { path = "../world" }
+locate = { path = "../locate" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+
+[features]
+# The real HTTPS transport (pure-Rust rustls, shared with the weather client).
+net = ["world/net", "locate/net"]
