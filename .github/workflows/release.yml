@@ -1,0 +1,156 @@
+# Release build: push a tag like v0.2.1 and this builds the Windows installer, the Linux
+# tarball and .deb, writes SHA256SUMS and publishes the GitHub release with the notes from
+# CHANGELOG.md. See "How to cut a release" in docs/RELEASING.md.
+#
+# The in-app updater downloads exactly these file names (crates/update/src/release.rs):
+#   Citylive2-Setup-<ver>.exe   citylive-2-<ver>-linux-x86_64.tar.gz   SHA256SUMS
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: The tag, Cargo.toml and CHANGELOG.md must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match the workspace version $crate in Cargo.toml" >&2; exit 1
+          fi
+          if ! grep -q "^## \[$tag\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$tag]' section" >&2; exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    env:
+      VER: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Build (MSVC, static CRT)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          # The icon and version resources are compiled with windres (mingw), which the runner image has.
+          export CITYLIVE_WINDRES="$(command -v windres || echo /c/mingw64/bin/windres)"
+          cargo build --release -p wallpaper -p settings
+          mkdir -p dist/windows
+          cp target/release/citylive-iso.exe dist/windows/citylive.exe
+          cp target/release/citylive-iso-settings.exe dist/windows/citylive-settings.exe
+      # SignPath Foundation (free code signing for open source) - OFF until the project is approved.
+      # See docs/windows-signing.md. When enabled, sign the two .exe files here, before they are packed
+      # into the installer, and sign the installer afterwards.
+      #
+      # - name: Sign the programs (SignPath)
+      #   if: false
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      #     project-slug: citylive-2
+      #     signing-policy-slug: release-signing
+      #     github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: dist/windows
+      - name: Installer and portable zip
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path
+          New-Item -ItemType Directory -Force dist | Out-Null
+          makensis -V2 "-DVERSION=$env:VER" "-DSRCDIR=$root\dist\windows" "-DICON=$root\assets\windows\citylive.ico" `
+            "-DLICENSE=$root\LICENSE" "-DOUTFILE=$root\dist\Citylive2-Setup-$env:VER.exe" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          $p = "dist\zip\Citylive 2"
+          New-Item -ItemType Directory -Force $p | Out-Null
+          Copy-Item dist\windows\citylive.exe, dist\windows\citylive-settings.exe $p
+          Copy-Item LICENSE "$p\LICENSE.txt"
+          "Citylive 2 $env:VER (portable). Run citylive.exe. This copy does not update itself; use the installer for that.`r`nWindows SmartScreen: More info, then Run anyway." | Set-Content "$p\README.txt"
+          Compress-Archive -Path "dist\zip\Citylive 2" -DestinationPath "dist\Citylive2-$env:VER-windows-x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/Citylive2-Setup-*.exe
+            dist/Citylive2-*-windows-x64.zip
+          if-no-files-found: error
+
+  linux:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libdbus-1-dev python3-pil
+      - name: Tarball and .deb
+        # package-linux.sh uses systemd-run for its memory cap; a runner has plenty, so build here and package.
+        run: |
+          cargo build --release -p wallpaper -p settings -p present_x11 -p present_gnome
+          sh bin/package-linux.sh --skip-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/citylive-2-*-linux-x86_64.tar.gz
+            dist/citylive-2_*_amd64.deb
+          if-no-files-found: error
+
+  publish:
+    needs: [check, windows, linux]
+    runs-on: ubuntu-latest
+    env:
+      VER: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum Citylive2-Setup-*.exe Citylive2-*-windows-x64.zip citylive-2-*-linux-x86_64.tar.gz citylive-2_*_amd64.deb > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VER" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "empty release notes" >&2; exit 1; }
+          cat notes.md
+      - name: Create the release
+        run: |
+          flag=""
+          case "$GITHUB_REF_NAME" in *-*) flag="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" $flag --title "Citylive 2 $VER" --notes-file notes.md \
+            dist/Citylive2-Setup-*.exe dist/Citylive2-*-windows-x64.zip \
+            dist/citylive-2-*-linux-x86_64.tar.gz dist/citylive-2_*_amd64.deb dist/SHA256SUMS

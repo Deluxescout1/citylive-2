@@ -1,0 +1,45 @@
+# Tests on every push and pull request.
+#
+# `cargo test` here runs every crate except `present_gnome`. The simulation suites
+# (`sim`, `render`) are the slow ones; they run in release mode with two test threads,
+# the same way the project is developed. Wall-clock budget tests (frame-time checks)
+# can flake on a loaded shared runner: re-run the job before suspecting the code.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev libx11-dev libdbus-1-dev
+      - name: Test
+        run: cargo test --release --workspace --exclude present_gnome -- --test-threads=2
+      - name: Shell scripts parse
+        run: for f in install.sh uninstall.sh bin/*.sh; do sh -n "$f"; done
+
+  windows:
+    # Compile-check the Windows programs (the presenter, the settings window, the updater).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        shell: bash
+        run: |
+          export CITYLIVE_WINDRES="$(command -v windres || echo /c/mingw64/bin/windres)"
+          cargo check --release -p wallpaper -p settings
+      - name: Unit tests that run on Windows
+        shell: bash
+        run: cargo test --release -p update -p locate -p world -- --test-threads=2
