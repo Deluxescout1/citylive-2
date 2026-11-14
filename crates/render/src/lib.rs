@@ -64,4 +64,9 @@ pub use city::{CityObj, ObjKind, Stage as BuildStage, Wear};
 pub use biome::{Ground, GroundTex, Pair, RoofStyle, SeasonStyle};
 pub use horizon::Horizon;
 pub use scene::{Probe, Scene, SceneConfig, SceneMode, SceneStats, report_pass_times};
+
+/// Turn the per-pass composite clock on when `CITYLIVE_PASS_TIME` is set.
+pub fn pass_time_enable_from_env() -> bool {
+    scene::pass_time::enable_from_env()
+}
 pub use weather::Ambient;

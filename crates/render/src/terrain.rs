@@ -1859,13 +1859,27 @@ impl Stroke {
 const MAX_STROKES: usize = 14;
 
 /// A tile's strokes.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct TilePrims {
     n: u8,
     s: [Option<Stroke>; MAX_STROKES],
 }
 
+/// B101: two tiles' strokes are the same when their used strokes are; the
+/// derived comparison also walked every empty slot of the 14.
+impl PartialEq for TilePrims {
+    fn eq(&self, o: &Self) -> bool {
+        self.n == o.n && self.s[..self.n as usize] == o.s[..o.n as usize]
+    }
+}
+
 impl TilePrims {
+    /// Forget the strokes (the slots are overwritten as new ones arrive).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.n = 0;
+    }
+
     fn push(&mut self, st: Stroke) {
         if (self.n as usize) < MAX_STROKES {
             self.s[self.n as usize] = Some(st);
@@ -2182,7 +2196,7 @@ pub fn water_overlay<F: WaterInk>(
     x: i32,
     y: i32,
 ) {
-    water_overlay_c(fb, cam, map, look, x, y, None)
+    water_overlay_c(fb, cam, map, look, x, y, None, None)
 }
 
 /// The smooth coast around tile `(x, y)` as the surf wants it (none where the
@@ -2202,6 +2216,7 @@ pub(crate) fn water_overlay_c<F: WaterInk>(
     x: i32,
     y: i32,
     pre: Option<Option<Coast>>,
+    ground: Option<&'static Ground>,
 ) {
     if !look.anim {
         return;
@@ -2219,7 +2234,13 @@ pub(crate) fn water_overlay_c<F: WaterInk>(
     // D66: the land's own highlight (a desert rapid is bleached white, a polar
     // one is pale ice blue).
     let pair = Pair::of(map);
-    let rapids = pair.at(map, x, y).rapids;
+    // B101: the land that owns the tile never changes between ticks, and
+    // finding it walks a noise field; the scene keeps it per water tile.
+    let owner = match ground {
+        Some(g) => g,
+        None => pair.at(map, x, y),
+    };
+    let rapids = owner.rapids;
     let hi = palette::mix(look.tint, rapids, 0.22 + 0.45 * k);
     // B64: at night the ripple crests are a faint glint, not cyan streaks.
     let dim = 0.30 + 0.70 * ((k - 0.2) / 0.6).clamp(0.0, 1.0);
@@ -2228,7 +2249,7 @@ pub(crate) fn water_overlay_c<F: WaterInk>(
     // The middle of the tile, in screen space.
     let (mx, my) = ((p[0].0 + p[2].0) * 0.5, (p[0].1 + p[2].1) * 0.5);
     // B46b: a frozen lake cracks instead of rippling.
-    if let Some(ice) = pair.at(map, x, y).ice {
+    if let Some(ice) = owner.ice {
         if matches!(kind, map::WaterKind::Lake | map::WaterKind::Pond) {
             let hsh = map.tile_hash(x, y);
             if hsh > 0.45 {

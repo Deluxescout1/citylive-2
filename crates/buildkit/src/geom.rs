@@ -7,9 +7,27 @@ pub const TW: i32 = 64;
 pub const HW: i32 = 32;
 pub const HH: i32 = 16;
 
+thread_local! {
+    /// B100: the plan scale a building is being fitted to its lot with: about
+    /// `(cx, cy)`, every tile-space `(x, y)` is pulled towards the centre by
+    /// `k` (heights are untouched). `1.0` outside a fit.
+    static FIT: std::cell::Cell<(f32, f32, f32)> = const { std::cell::Cell::new((0.0, 0.0, 1.0)) };
+}
+
+/// Draw with every plan coordinate scaled by `k` about the footprint centre
+/// `(cx, cy)` (B100's fit-to-lot).
+pub fn with_fit<R>(cx: f32, cy: f32, k: f32, f: impl FnOnce() -> R) -> R {
+    let old = FIT.with(|c| c.replace((cx, cy, k)));
+    let r = f();
+    FIT.with(|c| c.set(old));
+    r
+}
+
 /// Project 3D tile-space coordinates (x, y in tiles, z in pixels) to 2D screen space.
 #[inline]
 pub fn project(x: f32, y: f32, z: f32, ox: f32, oy: f32) -> (f32, f32) {
+    let (cx, cy, k) = FIT.with(|c| c.get());
+    let (x, y) = if k == 1.0 { (x, y) } else { (cx + (x - cx) * k, cy + (y - cy) * k) };
     (
         ox + (x - y) * (HW as f32),
         oy + (x + y) * (HH as f32) - z,

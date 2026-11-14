@@ -222,6 +222,86 @@ fn open_ground(kind: ObjKind) -> bool {
     )
 }
 
+/// B100: one painted piece of a city object. A lot is painted as one piece
+/// when a single painter diagonal orders it correctly, and as several vertical
+/// slices when it does not: a long or non-square lot is nearer the viewer at
+/// one end than at the other, so each screen column of it gets the diagonal of
+/// the nearest ground it stands on (`city_slices`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CitySlice {
+    /// Index into the scene's city objects.
+    pub idx: u32,
+    /// The screen columns this piece paints, `x0..x1` (open ends are
+    /// `i32::MIN` / `i32::MAX`, so a sprite that overhangs its lot is whole).
+    pub x0: i32,
+    pub x1: i32,
+    /// The painter diagonal of this piece (also its depth key for actors).
+    pub d: i32,
+    /// The first piece of its object: per-object work (pane bookkeeping)
+    /// happens once, here.
+    pub first: bool,
+    /// An overhang piece: columns past the lot's own ground, where the sprite
+    /// leans out over a neighbour. Painted before every real piece of the
+    /// same diagonal, so it never covers a neighbour's own wall.
+    pub ext: bool,
+}
+
+/// B100: the painter pieces of a lot, left to right on screen.
+///
+/// Screen column band `k` (`ox + 32k .. ox + 32k + 32`) lies over two ground
+/// diagonals of cells, `x - y = k` and `x - y = k + 1`. The nearest ground of
+/// the lot in that band is the cell with the largest `x + y` on either, and
+/// that is the diagonal the band is painted at. Two lots with disjoint
+/// footprints are then ordered correctly in **every** band they share, which
+/// one key per lot (the far corner's) cannot do for lots of different shapes.
+/// Neighbouring bands with the same diagonal merge, so a square lot is
+/// typically one piece.
+pub fn city_slices(cam: &Camera, o: &CityObj, idx: u32) -> Vec<CitySlice> {
+    let whole = |d: i32| {
+        vec![CitySlice { idx, x0: i32::MIN, x1: i32::MAX, d, first: true, ext: false }]
+    };
+    // A/B switch for the before/after numbers and crops (B100).
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let off = *OFF.get_or_init(|| std::env::var("CITYLIVE_NO_SLICES").is_ok());
+    if off || o.w <= 0 || o.h <= 0 {
+        return whole(o.diagonal());
+    }
+    let (x0, y0, x1, y1) = (o.x, o.y, o.x + o.w, o.y + o.h);
+    // Nearest cell diagonal on each cell column u = x - y.
+    let (umin, umax) = (x0 - (y1 - 1), (x1 - 1) - y0);
+    let dmax = |u: i32| -> Option<i32> {
+        let xm = (x1 - 1).min(y1 - 1 + u);
+        (xm >= x0.max(y0 + u)).then(|| 2 * xm - u)
+    };
+    let mut out: Vec<CitySlice> = Vec::new();
+    for k in (umin - 1)..=umax {
+        let d = match (dmax(k), dmax(k + 1)) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => continue,
+        };
+        let left = cam.ox + 32 * k;
+        match out.last_mut() {
+            Some(last) if last.d == d => last.x1 = left + 32,
+            _ => out.push(CitySlice { idx, x0: left, x1: left + 32, d, first: false, ext: false }),
+        }
+    }
+    if out.is_empty() {
+        return whole(o.diagonal());
+    }
+    if out.len() == 1 {
+        return whole(out[0].d);
+    }
+    // The sprite may lean past the lot's diamond: those columns are painted
+    // as separate overhang pieces (see `CitySlice::ext`).
+    let (l, r) = (out[0].x0, out[out.len() - 1].x1);
+    let (ld, rd) = (out[0].d, out[out.len() - 1].d);
+    out[0].first = true;
+    out.insert(0, CitySlice { idx, x0: i32::MIN, x1: l, d: ld, first: false, ext: true });
+    out.push(CitySlice { idx, x0: r, x1: i32::MAX, d: rd, first: false, ext: true });
+    out
+}
+
 /// Width of one screen-x band of the static index, in pixels.
 const BAND: i32 = 64;
 /// B76 r2: how many x bands of one painter diagonal a rebuild slice draws. A
@@ -274,7 +354,7 @@ fn draw_items(
     bounds: &[Rect],
     index: &[Vec<Vec<u32>>],
     city: &[CityObj],
-    city_diag: &[Vec<u32>],
+    city_diag: &[Vec<CitySlice>],
     kit: &[KitSprite],
     holiday: &crate::holiday::HolidayLook,
     market: bool,
@@ -429,11 +509,15 @@ fn draw_items(
             drawn += 1;
         }
         if let Some(list) = city_diag.get(d as usize) {
-            for &c in list {
-                let o = &city[c as usize];
-                if !clip.intersects(&obj_bounds(cam, o)) {
+            for &sl in list {
+                let c = sl.idx as usize;
+                let o = &city[c];
+                let ob = obj_bounds(cam, o);
+                let piece = Rect::new(ob.x0.max(sl.x0), ob.y0, ob.x1.min(sl.x1), ob.y1);
+                if piece.is_empty() || !clip.intersects(&piece) {
                     continue;
                 }
+
                 // Something whose ground line is behind the horizon is not in
                 // the world any more: skip it whole rather than cut it (B42b).
                 let (_, foot) = cam.project(
@@ -444,9 +528,16 @@ fn draw_items(
                 if (foot as i32) < land_y - 4 {
                     continue;
                 }
+                // B100: a sliced lot paints only its own screen columns here.
+                fb.set_clip(Rect::new(clip.x0.max(sl.x0), clip.y0, clip.x1.min(sl.x1), clip.y1));
                 // Same painter key as the ground: the depth mask hides actors
                 // behind the house, and the house behind a hill.
                 fb.set_depth_key(static_key(d, true));
+                // Engine art keys itself: tell it this piece's diagonal, and
+                // let only the first piece record windows (B100).
+                fb.set_slice_diag(Some(d));
+                let rec = fb.record_windows;
+                fb.record_windows = rec && sl.first;
                 // A building is solid: the horizon haze leaves it alone, and it
                 // is hidden once it is past the horizon (B42b).
                 fb.solid = TAG_BUILT;
@@ -488,7 +579,7 @@ fn draw_items(
                         // scaffolding. Static art, so nothing per frame.
                         crate::wear::over(fb, o, k, sx as i32 - k.ox, sy as i32 - k.oy);
                         // B72: the sprite's window panes are switchable lights.
-                        if !k.panes.is_empty() {
+                        if sl.first && !k.panes.is_empty() {
                             fb.push_kit_panes(
                                 crate::windows::obj_key(o.x, o.y),
                                 &k.panes,
@@ -508,8 +599,10 @@ fn draw_items(
                     // D66: the plot's own ground (park lawn, pond, yard) wears
                     // the world's land.
                     o.draw_in_land(fb, cam, glow, hour, weather.snow_cover, season, biome.at(map, o.x, o.y));
-                    *engine_draws += 1;
-                } else {
+                    if sl.first {
+                        *engine_draws += 1;
+                    }
+                } else if sl.first {
                     *kit_draws += 1;
                 }
                 // B76: the season on the built city — snow on a kit roof,
@@ -635,6 +728,9 @@ fn draw_items(
                         crate::spectacle::banner_dress(fb, cam, &sq, [holiday.bulb(0), holiday.bulb(1)], true);
                     }
                 }
+                fb.set_clip(clip);
+                fb.set_slice_diag(None);
+                fb.record_windows = rec;
                 drawn += 1;
             }
         }
@@ -748,6 +844,40 @@ impl KitSprite {
         let y0 = x1 - umax as f32 / 32.0;
         [x0.max(0.0), y0.max(0.0), x1.max(x0 + 0.3), y1.max(y0 + 0.3)]
     }
+}
+
+/// B100: how far a sprite reaches past the ground of its own `lw` x `lh` lot,
+/// in pixels: the worst of the left and right overshoot of the lot diamond's
+/// width and how far below its two front edges any pixel is drawn. `0` means
+/// the sprite stands inside its lot; the anchor `(ox, oy)` is the lot's
+/// origin corner. `opaque(i)` says whether sprite pixel `i` (row-major) is
+/// drawn.
+pub fn lot_overhang(
+    w: usize,
+    h: usize,
+    ox: i32,
+    oy: i32,
+    lw: i32,
+    lh: i32,
+    opaque: impl Fn(usize) -> bool,
+) -> i32 {
+    let (ul, ub, ur) = (-lh * 32, (lw - lh) * 32, lw * 32);
+    let (vl, vb) = (lh * 16, (lw + lh) * 16);
+    let mut worst = 0;
+    for j in 0..h {
+        let v = j as i32 - oy;
+        for i in 0..w {
+            if !opaque(j * w + i) {
+                continue;
+            }
+            let u = i as i32 - ox;
+            let mut over = (ul - u).max(u - ur + 1);
+            let edge = if u <= ub { vl + (u - ul) / 2 } else { vb - (u - ub) / 2 };
+            over = over.max(v - edge);
+            worst = worst.max(over);
+        }
+    }
+    worst.max(0)
 }
 
 /// Screen bounds of a city object (its plot plus the height of the building).
@@ -1028,6 +1158,9 @@ pub struct Scene {
     traffic_bands: crate::bands::Bands,
     parked_px: Vec<(i32, i32)>,
     parked_bands: crate::bands::Bands,
+    /// B101: the same cars bucketed by their ground (z = 0) screen row, which
+    /// is what the shadow pass culls on.
+    parked_shadow_bands: crate::bands::Bands,
     mover_bands: crate::bands::Bands,
     /// The animated water: tile, screen position, and its row index (static, so
     /// it is rebuilt with the static layer rather than per frame).
@@ -1062,6 +1195,9 @@ pub struct Scene {
     /// Rail/station/port fixtures and the movers (B31).
     fixtures: crate::rail::Fixtures,
     movers: Vec<crate::rail::Body>,
+    /// B101: the boats' distance-haze rows (empty when no boat is on screen),
+    /// built when the movers are set instead of once per damaged rectangle.
+    mover_haze: Vec<f32>,
     mover_sprites: crate::rail::MoverRenderer,
     /// What changed since the last composite, in framebuffer space (B30). `None`
     /// (via `full_pending`) means "redraw everything".
@@ -1101,6 +1237,8 @@ pub struct Scene {
     sea_cols: Vec<u16>,
     /// B92: the smooth coast of each water tile in `water_px` order.
     water_coast: Vec<Option<terrain::Coast>>,
+    /// B101: the land look that owns each water tile (same order).
+    water_ground: Vec<&'static crate::biome::Ground>,
     /// Scratch for `animate_water` (B61): the visible water tiles are collected
     /// here and reused, so a per-frame water tick allocates nothing.
     water_scratch: Vec<(i32, i32)>,
@@ -1142,7 +1280,7 @@ pub struct Scene {
     sign_slot: i64,
     /// Scratch for the animated panels' damage (no allocation per tick).
     sign_rects: Vec<Rect>,
-    city_diag: Vec<Vec<u32>>,
+    city_diag: Vec<Vec<CitySlice>>,
     /// Pre-rendered building sprites (B33 buildkit), indexed by `CityObj::kit - 1`.
     kit: Vec<KitSprite>,
     dirty: Vec<Rect>,
@@ -1400,6 +1538,7 @@ impl Scene {
             traffic_bands: crate::bands::Bands::default(),
             parked_px: Vec::new(),
             parked_bands: crate::bands::Bands::default(),
+            parked_shadow_bands: crate::bands::Bands::default(),
             mover_bands: crate::bands::Bands::default(),
             water_px: Vec::new(),
             water_bands: crate::bands::Bands::default(),
@@ -1418,6 +1557,7 @@ impl Scene {
             parked: Vec::new(),
             fixtures: crate::rail::Fixtures::default(),
             movers: Vec::new(),
+            mover_haze: Vec::new(),
             mover_sprites: crate::rail::MoverRenderer::new(),
             people_sprites: crate::people::PeopleRenderer::new(),
             pending: Vec::new(),
@@ -1433,6 +1573,7 @@ impl Scene {
             water_tiles: Vec::new(),
             sea_cols: Vec::new(),
             water_coast: Vec::new(),
+            water_ground: Vec::new(),
             water_scratch: Vec::new(),
             water_baked_night: 0,
             trees: crate::sway::TreeLayer::default(),
@@ -1597,7 +1738,7 @@ impl Scene {
             ),
             (
                 "city objects",
-                v(&self.city) + v(&self.city_diag) + self.city_diag.iter().map(|d| d.capacity() * 4).sum::<usize>(),
+                v(&self.city) + v(&self.city_diag) + self.city_diag.iter().map(|d| d.capacity() * std::mem::size_of::<CitySlice>()).sum::<usize>(),
             ),
             (
                 "sorted lists + band index (people/traffic/movers/water/lamps)",
@@ -3267,6 +3408,21 @@ impl Scene {
     /// band, the last row of ground *is* the colour painted behind it and there
     /// is no seam to see — the old model started at full strength, which read as
     /// a flat slab with a hard top edge.
+    /// The ground's own haze, and past it the far water still greys and
+    /// flattens towards the horizon: a boat there is a distant boat (B91).
+    fn boat_haze_rows(&self) -> Vec<f32> {
+        let mut rows = self.haze_profile();
+        let reach = ((self.height() - self.sky_h) as f32 * 0.22).clamp(60.0, 220.0);
+        for (y, slot) in rows.iter_mut().enumerate() {
+            // Rows above the sky line (the belt's far water) are the furthest of all.
+            let d = (y as f32 - self.sky_h as f32).max(0.0);
+            let far = (1.0 - d / reach).max(0.0);
+            let top = if y < self.sky_h { 0.95 } else { 0.85 };
+            *slot = slot.max(far.powf(1.3) * top);
+        }
+        rows
+    }
+
     fn haze_profile(&self) -> Vec<f32> {
         let h = self.height();
         let mut out = vec![0.0f32; h];
@@ -3395,10 +3551,18 @@ impl Scene {
         let diags = self.city_diag.len();
         self.city_diag = vec![Vec::new(); diags];
         for (i, o) in objects.iter().enumerate() {
-            let d = o.diagonal().max(0) as usize;
-            if d < diags {
-                self.city_diag[d].push(i as u32);
+            // Sprites of the kit are painted in column slices (B100); engine
+            // art keeps its one diagonal (it stamps its own depth keys).
+            for sl in city_slices(&self.cam, o, i as u32) {
+                let d = sl.d.max(0) as usize;
+                if d < diags {
+                    self.city_diag[d].push(sl);
+                }
             }
+        }
+        // Overhang pieces first (stable): see `CitySlice::ext`.
+        for list in self.city_diag.iter_mut() {
+            list.sort_by_key(|s| !s.ext);
         }
         // B43: the key each plot paints itself with, per tile, so a figure
         // standing on it can be drawn over the plot (a park has no walls).
@@ -3420,10 +3584,16 @@ impl Scene {
             // A car place's ground paints with a key under its first tile, so
             // the cars standing on it are drawn over the asphalt but behind the
             // canopy or the kiosk (those stamp their own keys, B59b).
-            let key = if o.kind.is_car_place() {
+            let solid = o.stage == Stage::Finished && !open_ground(o.kind) && !o.kind.is_car_place();
+            // B100: a solid building's walls are painted in column slices, so a
+            // figure on its plot is lifted to the ground key of the slice over
+            // its own tile (for a square lot that is the far corner's, as
+            // before; for a long lot it is the diagonal of the nearest ground
+            // in that column).
+            let slices = if solid { city_slices(&self.cam, o, 0) } else { Vec::new() };
+            let d_at = |px: i32| slices.iter().find(|s| px >= s.x0 && px < s.x1).map(|s| s.d);
+            let flat_key = if o.kind.is_car_place() {
                 static_key(o.x + o.y - 1, true)
-            } else if o.stage == Stage::Finished && !open_ground(o.kind) {
-                static_key(o.diagonal(), false)
             } else {
                 static_key(o.diagonal(), true)
             };
@@ -3434,6 +3604,13 @@ impl Scene {
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = (y * w + x) as usize;
+                    let key = if solid {
+                        let cx = self.cam.ox + (x - y) * 32;
+                        let d = d_at(cx - 16).max(d_at(cx + 16)).unwrap_or(o.diagonal());
+                        static_key(d, false)
+                    } else {
+                        flat_key
+                    };
                     if key > self.city_key[i] {
                         self.city_key[i] = key;
                     }
@@ -3599,6 +3776,16 @@ impl Scene {
         &self.city
     }
 
+    /// B100: when the piece of object `i` that paints screen column `x` is
+    /// painted, as a number that grows with paint order (tools and tests; the
+    /// order audit compares two of them).
+    pub fn paint_rank(&self, i: usize, x: i32) -> u64 {
+        let o = &self.city[i];
+        let sl = city_slices(&self.cam, o, i as u32);
+        let s = sl.iter().find(|s| x >= s.x0 && x < s.x1).unwrap_or(&sl[0]);
+        ((s.d.max(0) as u64) << 32) | ((!s.ext) as u64) << 31 | i as u64
+    }
+
     pub fn static_layer(&self) -> &Framebuffer {
         &self.static_layer
     }
@@ -3623,6 +3810,12 @@ impl Scene {
         for &(x, y) in &self.water_tiles {
             let (sx, sy) = self.cam.project(x as f32, y as f32, 0);
             self.water_px.push((x, y, sx as i32, sy as i32));
+        }
+        self.water_ground.clear();
+        {
+            let pair = crate::biome::Pair::of(&self.map);
+            self.water_ground
+                .extend(self.water_tiles.iter().map(|&(x, y)| pair.at(&self.map, x, y)));
         }
         self.water_coast.clear();
         self.water_coast
@@ -4698,6 +4891,25 @@ impl Scene {
             self.mark_rect(r);
         }
         self.parked = keep;
+        // B101: the bays never move, so their screen rows are indexed once, when
+        // the set changes (they were scanned in full for every damaged rectangle).
+        let h = self.height() as i32;
+        // Keyed 32 px above the car's feet: the renderer's band search reaches 48 px
+        // either way, and a tall vehicle (a van, a bus) reaches further up than that.
+        let draw_rows: Vec<(i32, u32)> = self
+            .parked
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (self.cam.project(b.x, b.y, self.map.ground_px(b.x, b.y) + b.lift as i32).1 as i32 - 32, i as u32))
+            .collect();
+        self.parked_bands.rebuild(h, draw_rows);
+        let ground_rows: Vec<(i32, u32)> = self
+            .parked
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (self.cam.project(b.x, b.y, 0).1 as i32, i as u32))
+            .collect();
+        self.parked_shadow_bands.rebuild(h, ground_rows);
         let now: Vec<Rect> = self.parked.iter().map(|b| self.screen_rect(b.x, b.y, 10)).collect();
         for r in now {
             self.mark_rect(r);
@@ -4782,6 +4994,14 @@ impl Scene {
             self.mark_rect(r);
         }
         self.movers = movers.into_iter().filter(|b| keep(self, b)).collect();
+        let has_boats = self.movers.iter().any(|b| {
+            matches!(b.kind, crate::rail::Kind::Boat | crate::rail::Kind::Ship | crate::rail::Kind::Ferry)
+        });
+        if !has_boats {
+            self.mover_haze.clear();
+        } else if self.mover_haze.is_empty() {
+            self.mover_haze = self.boat_haze_rows();
+        }
         // B61d: the shadow pass's screen positions, once per frame.
         let before_movers = std::mem::take(&mut self.movers_px);
         self.movers_px.clear();
@@ -4963,22 +5183,54 @@ impl Scene {
                 && py + REACH >= clip.y0
                 && py - REACH < clip.y1
         };
+        // B101: the cheap exact cull. The swept footprint of a shadow lies inside
+        // the box from the anchor, grown by the footprint and by the shadow's own
+        // offset, so an actor whose box misses the clip never reaches the 8
+        // projections `draw_actor_shadow_in` does to find that out. (The REACH
+        // test above stays: it decides which shadows exist at all.)
+        let reaches = |x: f32, y: f32, z: i32, hw: f32, hh: f32, height: f32| -> bool {
+            let (sx, sy) = cam.project(x, y, z);
+            let (sx, sy) = (sx as i32, sy as i32);
+            let foot = hw.max(hh).max(0.01) * 2.0;
+            let fx = (foot * map::iso_consts::HALF_W as f32).ceil() as i32 + 3;
+            let fy = (foot * map::iso_consts::HALF_H as f32).ceil() as i32 + 3;
+            let ox = ((sh.dx - sh.dy) * map::iso_consts::HALF_W as f32 * height) as i32;
+            let oy = ((sh.dx + sh.dy) * map::iso_consts::HALF_H as f32 * height) as i32;
+            sx + fx + ox.max(0) + 2 >= clip.x0
+                && sx - fx + ox.min(0) - 2 < clip.x1
+                && sy + fy + oy.max(0) + 2 >= clip.y0
+                && sy - fy + oy.min(0) - 2 < clip.y1
+        };
         // B59b: cars standing in bays cast the sun's shadow too (the deck's
         // roof cars stand at their deck's height).
-        for b in &self.parked {
+        let mut parked_shadow = |i: usize| {
+            let b = &self.parked[i];
             let (px, py) = self.cam.project(b.x, b.y, 0);
             if !in_clip(px as i32, py as i32) {
-                continue;
+                return;
             }
             let len = b.kind.length_px() as f32 / map::iso_consts::TILE_W as f32;
             let wid = b.kind.width_px() as f32 / map::iso_consts::TILE_W as f32;
             let z = map.ground_px(b.x, b.y) + b.lift as i32;
             let (hw, hh) = if b.dir.0 != 0.0 { (len * 0.5, wid * 0.5) } else { (wid * 0.5, len * 0.5) };
+            if !reaches(b.x, b.y, z, hw, hh, b.kind.height_px() as f32) {
+                return;
+            }
             let key = crate::actors::actor_key(b.x.floor() as i32, b.y.floor() as i32);
             let _ = crate::light::draw_actor_shadow_in(dst, cam, depth, &self.shadow, key, b.x, b.y, z, hw, hh, b.kind.height_px() as f32, &sh, true);
+        };
+        if self.parked_shadow_bands.is_empty() {
+            for i in 0..self.parked.len() {
+                parked_shadow(i);
+            }
+        } else {
+            self.parked_shadow_bands.for_each(clip, REACH, |i| parked_shadow(i as usize));
         }
         let mut one = |x: f32, y: f32, hw: f32, hh: f32, height: f32, key: u16| {
             let z = map.ground_px(x, y);
+            if !reaches(x, y, z, hw, hh, height) {
+                return;
+            }
             let _ = crate::light::draw_actor_shadow_in(dst, cam, depth, &self.shadow, key, x, y, z, hw, hh, height, &sh, true);
         };
         for c in &self.life.cars {
@@ -5259,7 +5511,7 @@ impl Scene {
                 {
                     return;
                 }
-                terrain::water_overlay_c(dst, &self.cam, &self.map, &self.water, x, y, self.water_coast.get(i).copied());
+                terrain::water_overlay_c(dst, &self.cam, &self.map, &self.water, x, y, self.water_coast.get(i).copied(), self.water_ground.get(i).copied());
             };
             if self.water_bands.is_empty() {
                 for i in 0..self.water_px.len() {
@@ -5385,9 +5637,12 @@ impl Scene {
         // B62: parade floats and the gameday lot, under the people.
         lap.mark(9);
         self.draw_spec_under(dst, r);
+        lap.mark(15);
         // B60: every mover's own shadow, before the movers are drawn on top.
         self.draw_moving_shadows(dst);
+        lap.mark(16);
         self.draw_actors(dst);
+        lap.mark(17);
         if !self.traffic.is_empty() {
             self.traffic_sprites.draw(
                 dst,
@@ -5402,6 +5657,7 @@ impl Scene {
                 self.weather.snow_cover,
             );
         }
+        lap.mark(18);
         if !self.parked.is_empty() {
             self.traffic_sprites.draw(
                 dst,
@@ -5416,6 +5672,7 @@ impl Scene {
                 self.weather.snow_cover,
             );
         }
+        lap.mark(19);
         for &(x, y, f) in &self.walkers {
             let level = self.map.surface_level_at(x, y);
             let (fx, fy) = self.cam.project(x, y, self.level_px(level as u8));
@@ -5463,6 +5720,7 @@ impl Scene {
                 rig.draw(&mut pen, &self.cam, clock, work);
             }
         }
+        lap.mark(20);
         // B43/D65: the residents — builders, farmers, commuters, the park.
         if !self.people.is_empty() {
             self.people_sprites.draw(
@@ -5479,7 +5737,7 @@ impl Scene {
                 self.spec.extra_from,
             );
         }
-        lap.mark(10);
+        lap.mark(21);
         dst.set_clip(r);
         // B31: trains, trams, boats and planes, above the traffic. B58d: the
         // ground ones are clipped to the land band (the city clips everything it
@@ -5489,27 +5747,8 @@ impl Scene {
             let land = self.land_clip();
             dst.set_clip(r.intersect(&land));
             // B91: boats fade into the distance haze the way the water does.
-            let has_boats = self.movers.iter().any(|b| {
-                matches!(b.kind, crate::rail::Kind::Boat | crate::rail::Kind::Ship | crate::rail::Kind::Ferry)
-            });
-            // The ground's own haze, and past it the far water still greys and
-            // flattens towards the horizon: a boat there is a distant boat.
-            let haze_rows = if has_boats {
-                let mut rows = self.haze_profile();
-                let reach = ((self.height() - self.sky_h) as f32 * 0.22).clamp(60.0, 220.0);
-                for (y, slot) in rows.iter_mut().enumerate() {
-                    // Rows above the sky line (the belt's far water) are the
-                    // furthest of all.
-                    let d = (y as f32 - self.sky_h as f32).max(0.0);
-                    let far = (1.0 - d / reach).max(0.0);
-                    let top = if y < self.sky_h { 0.95 } else { 0.85 };
-                    *slot = slot.max(far.powf(1.3) * top);
-                }
-                rows
-            } else {
-                Vec::new()
-            };
-            let haze = if has_boats { Some(haze_rows.as_slice()) } else { None };
+            let haze = if self.mover_haze.is_empty() { None } else { Some(self.mover_haze.as_slice()) };
+            lap.mark(22);
             self.mover_sprites.draw(
                 dst,
                 &self.cam,
@@ -5534,6 +5773,7 @@ impl Scene {
                 &[],
             );
         }
+        lap.mark(23);
         // (B62: the parade is part of the spectacle layer now: floats under the
         // people, the band and the kerb crowd as people.)
         // B62: spectacle over the world (Bills win fireworks are in there).
@@ -6728,11 +6968,11 @@ impl Scene {
         // B87: the strokes that moved, on a grid sized so a box costs more than
         // the pixels it adds (a composite pays ~1.4 us per rectangle).
         let water_rects = std::mem::take(&mut self.water_pending);
-        let water_spans = if water_rects.is_empty() {
-            Vec::new()
-        } else {
-            grid_spans(&water_rects, Rect::from_size(self.width(), self.height()), WATER_CELL.0, WATER_CELL.1)
-        };
+        // B101: the water's moved strokes are tiny boxes (a few dozen pixels
+        // each, hundreds of them). They used to be rounded out to a 64x32 grid,
+        // which turned 30 kpx of change into 1.6 Mpx of composite; now they go
+        // through the same cost-based merge as every other box (`merge_by_cost`).
+        let water_spans = water_rects;
         let tree_spans = if tree_rects.is_empty() {
             Vec::new()
         } else {
@@ -6748,7 +6988,7 @@ impl Scene {
         if rects.is_empty() {
             let mut v = tree_spans;
             v.extend(water_spans);
-            return Some(v);
+            return Some(merge_by_cost(v, self.rect_cost()));
         }
         // B31b: **no cascading merge**. `merge_rects` unions any two overlapping
         // boxes and iterates to a fixpoint, so a street of cars chains into one
@@ -6771,7 +7011,7 @@ impl Scene {
         if out.is_empty() {
             let mut v = tree_spans;
             v.extend(water_spans);
-            return Some(v);
+            return Some(merge_by_cost(v, self.rect_cost()));
         }
         // D71: hundreds of small boxes (a walking crowd, a street of cars) used
         // to blow the cap and send every frame down the full-frame path — which
@@ -6779,33 +7019,52 @@ impl Scene {
         // coarse grid instead: each 64x32 cell that anything touched is
         // composited once, merged into row spans. Ten boxes' worth of extra
         // pixels buys one pass over the layers instead of four hundred.
+        let (in_n, in_area) = (out.len(), out.iter().map(|r| r.area()).sum::<i64>());
+        let (tree_n, tree_area) = (tree_spans.len(), tree_spans.iter().map(|r| r.area()).sum::<i64>());
+        let (water_n, water_area) = (water_spans.len(), water_spans.iter().map(|r| r.area()).sum::<i64>());
+        // The pending boxes (movers, lamps, signs, static repaints) go through the
+        // grid, as they always have: its rounding is also the margin that the
+        // producers' tight boxes rely on (a mover's lamps, a shadow's tip, a
+        // sprite's overhang), and rectangles taken exactly leave a few thousand
+        // stale pixels in a big city. The water's and the trees' boxes are exact
+        // by construction (the strokes' own bounds) and numerous, so they are
+        // merged by what a rectangle costs.
         let mut spans = coalesce(&out, frame);
+        let mut fine = tree_spans;
+        fine.extend(water_spans);
+        spans.extend(merge_by_cost(fine, self.rect_cost()));
         let area: i64 = spans
             .iter()
             .map(|r| (r.x1 - r.x0).max(0) as i64 * (r.y1 - r.y0).max(0) as i64)
             .sum();
         if std::env::var("PP_DEBUG").is_ok() {
-            let in_area: i64 = out.iter().map(|r| r.area()).sum();
-            let tree_area: i64 = tree_spans.iter().map(|r| r.area()).sum();
             eprintln!(
-                "pending: {} rects ({} px) -> {} boxes, {:.1} % area; trees {} ({} px)",
-                out.len(),
+                "pending: {} rects ({} px) + trees {} ({} px) + water {} ({} px) -> {} boxes, {:.1} % area",
+                in_n,
                 in_area,
+                tree_n,
+                tree_area,
+                water_n,
+                water_area,
                 spans.len(),
-                area as f32 * 100.0 / (frame.x1 as f32 * frame.y1 as f32),
-                tree_spans.len(),
-                tree_area
+                area as f32 * 100.0 / (frame.x1 as f32 * frame.y1 as f32)
             );
         }
-        if areas_too_big(&spans, frame) {
+        if areas_too_big(&spans, frame, self.rect_cost()) {
             if std::env::var("PP_DEBUG").is_ok() {
                 eprintln!("pp: FULL because {} spans / {:.1} % area", spans.len(), area as f32 * 100.0 / (frame.x1 as f32 * frame.y1 as f32));
             }
             return None;
         }
-        spans.extend(tree_spans);
-        spans.extend(water_spans);
         Some(spans)
+    }
+
+    /// B101: what one more rectangle costs a composite, in pixels of area: the
+    /// fixed work every `composite_rect` repeats (the per-layer culls, the band
+    /// walks, the sprite lists) measured at about 2.6 kpx on the desktop save.
+    fn rect_cost(&self) -> i64 {
+        static C: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+        *C.get_or_init(|| std::env::var("CITYLIVE_RECT_COST").ok().and_then(|v| v.parse().ok()).unwrap_or(RECT_COST_PX))
     }
 
     /// A point's screen position on the ground, for a cull test (B61d).
@@ -6940,13 +7199,21 @@ impl Scene {
     /// B87: the ripple strokes of tile `i` at the current look, or none where
     /// the compositor does not draw it (hazed rows, off the frame).
     fn water_strokes(&self, i: usize, haze_bottom: i32, strong: bool) -> terrain::TilePrims {
-        let (x, y, xs, ys) = self.water_px[i];
         let mut out = terrain::TilePrims::default();
-        if strong && ys < haze_bottom {
-            return out;
-        }
-        terrain::water_overlay_c(&mut out, &self.cam, &self.map, &self.water, x, y, self.water_coast.get(i).copied());
+        self.water_strokes_into(i, haze_bottom, strong, &mut out);
         out
+    }
+
+    /// [`Self::water_strokes`] into a buffer the caller reuses (B101: a tick
+    /// asks for seventeen thousand tiles; a fresh 500-byte value each was a
+    /// good part of its cost).
+    fn water_strokes_into(&self, i: usize, haze_bottom: i32, strong: bool, out: &mut terrain::TilePrims) {
+        out.clear();
+        let (x, y, _xs, ys) = self.water_px[i];
+        if strong && ys < haze_bottom {
+            return;
+        }
+        terrain::water_overlay_c(out, &self.cam, &self.map, &self.water, x, y, self.water_coast.get(i).copied(), self.water_ground.get(i).copied());
     }
 
     /// B87: the water tick for a look the screen already shows: paint nothing,
@@ -6962,8 +7229,9 @@ impl Scene {
         let frame = Rect::from_size(self.width(), self.height());
         let land = self.land_clip();
         let mut changed = 0usize;
+        let mut new = terrain::TilePrims::default();
         for i in 0..prims.len() {
-            let new = self.water_strokes(i, haze_bottom, strong > 0);
+            self.water_strokes_into(i, haze_bottom, strong > 0, &mut new);
             let old = &prims[i];
             if *old == new {
                 continue;
@@ -7331,16 +7599,76 @@ fn row_spans(bits: &[bool], cols: usize, rows: usize, cw: i32, ch: i32, frame: R
 
 /// Is one full-frame composite cheaper than this list? (D71: the answer is
 /// "no" for the ordinary animated frame, which is the whole point.)
-fn areas_too_big(spans: &[Rect], frame: Rect) -> bool {
-    if spans.len() > 256 {
-        return true;
-    }
+fn areas_too_big(spans: &[Rect], frame: Rect, cost: i64) -> bool {
+    // B101: judged by what the composite would pay (area plus a fixed cost per
+    // rectangle), against what the whole frame costs: past 80 % of it a full
+    // composite is the cheaper and simpler frame.
     let area: i64 = spans
         .iter()
         .map(|r| (r.x1 - r.x0).max(0) as i64 * (r.y1 - r.y0).max(0) as i64)
         .sum();
     let all = frame.x1 as i64 * frame.y1 as i64;
-    area * 10 > all * 8
+    (area + spans.len() as i64 * cost) * 10 > all * 8
+}
+
+/// B101: the fixed cost of one damage rectangle, in pixels (see `rect_cost`).
+pub const RECT_COST_PX: i64 = 1000;
+
+/// B101: merge damage boxes by what the composite will pay for them. A box
+/// costs `cost + area` pixels; two boxes become their union when that is no
+/// dearer than the pair. Sparse boxes stay apart (a union of two far ones is
+/// all empty space, so nothing chains into a frame-wide box), and a dense
+/// cluster (hundreds of stroke boxes in a lake, a street of cars) collapses to
+/// a few rectangles instead of paying the fixed cost hundreds of times.
+///
+/// Boxes are binned into 256 px columns by their centre and swept top to
+/// bottom against the next few in the column, twice (a merged box can reach a
+/// neighbour it could not before).
+pub fn merge_by_cost(mut rects: Vec<Rect>, cost: i64) -> Vec<Rect> {
+    if rects.len() < 2 {
+        return rects;
+    }
+    const COL: i32 = 256;
+    const WINDOW: usize = 24;
+    let cols = rects.iter().map(|r| ((r.x0 + r.x1) / 2).max(0) / COL).max().unwrap_or(0) as usize + 1;
+    let mut bins: Vec<Vec<Rect>> = vec![Vec::new(); cols];
+    for r in rects.drain(..) {
+        bins[(((r.x0 + r.x1) / 2).max(0) / COL) as usize].push(r);
+    }
+    let area = |r: &Rect| (r.x1 - r.x0).max(0) as i64 * (r.y1 - r.y0).max(0) as i64;
+    let mut out = Vec::new();
+    for mut bin in bins {
+        for _pass in 0..2 {
+            if bin.len() < 2 {
+                break;
+            }
+            bin.sort_unstable_by_key(|r| (r.y0, r.x0));
+            let mut merged_any = false;
+            let mut i = 0;
+            while i < bin.len() {
+                let mut j = i + 1;
+                while j < bin.len() && j <= i + WINDOW {
+                    let (a, b) = (bin[i], bin[j]);
+                    let u = a.union(&b);
+                    if area(&u) <= area(&a) + area(&b) + cost {
+                        bin[i] = u;
+                        bin.swap_remove(j);
+                        merged_any = true;
+                        // `swap_remove` moved the last box into `j`: look at it
+                        // again, the window is still in order enough.
+                        continue;
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
+            if !merged_any {
+                break;
+            }
+        }
+        out.extend(bin);
+    }
+    out
 }
 
 /// The active caster's ground direction, for the "has the light moved enough to
@@ -8601,7 +8929,7 @@ pub mod pass_time {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// The passes, in the order `composite_rect` runs them.
-    pub const NAMES: [&str; 15] = [
+    pub const NAMES: [&str; 24] = [
         "sky",
         "static blit",
         "cast shadows",
@@ -8612,17 +8940,26 @@ pub mod pass_time {
         "nightlife",
         "cloud shadows",
         "street/tech/camp",
-        "actors+movers",
-        "people+traffic",
+        "(unused)",
+        "spec/civic over",
         "cloud band",
         "rain",
         "ambient wash",
+        "spec under",
+        "move shadows",
+        "actors",
+        "traffic",
+        "parked",
+        "sites+rigs",
+        "people",
+        "boat haze",
+        "mover draw",
     ];
 
     pub static ON: AtomicBool = AtomicBool::new(false);
 
     thread_local! {
-        static T: RefCell<[u64; 15]> = const { RefCell::new([0u64; 15]) };
+        static T: RefCell<[u64; 24]> = const { RefCell::new([0u64; 24]) };
     }
 
     /// Turn the clock on from the environment, once.
@@ -8669,7 +9006,7 @@ pub mod pass_time {
         }
     }
 
-    pub fn take() -> [u64; 15] {
+    pub fn take() -> [u64; 24] {
         T.with(|t| std::mem::take(&mut *t.borrow_mut()))
     }
 }

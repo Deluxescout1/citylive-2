@@ -430,6 +430,28 @@ pub fn slice_into_output_rect(
     // The horizontal span this source row covers in the head buffer.
     let a0 = ((fx0 * scale as i32 - x_offset) * hsf).max(0) as usize;
     let b0 = (((fx1 - 1) * scale as i32 - x_offset) * hsf + s).min(px_w as i32).max(0) as usize;
+    // B101: at 1:1 (the owner's desk) a row is a straight copy, not a run fill per pixel.
+    if s == 1 {
+        for fy in fy0..fy1 {
+            let r0 = fy * scale as i32 - y_offset;
+            if r0 < 0 || r0 >= px_h as i32 {
+                continue;
+            }
+            let src_row = fy as usize * fb_w;
+            let base = r0 as usize * px_w;
+            let n = (fx1 - fx0) as usize;
+            if a0 + n > px_w {
+                continue;
+            }
+            dst_px[base + a0..base + a0 + n]
+                .copy_from_slice(&src_fb[src_row + fx0 as usize..src_row + fx1 as usize]);
+        }
+        let bx0 = ((ix0 * scale as i32 - x_offset) * hsf).max(0);
+        let by0 = ((iy0 * scale as i32 - y_offset) * hsf).max(0);
+        let bx1 = ((ix1 * scale as i32 - x_offset) * hsf).min(px_w as i32);
+        let by1 = ((iy1 * scale as i32 - y_offset) * hsf).min(px_h as i32);
+        return render::Rect::new(bx0, by0, bx1, by1);
+    }
     for fy in fy0..fy1 {
         let by0 = (fy * scale as i32 - y_offset) * hsf;
         let r0 = by0.max(0);

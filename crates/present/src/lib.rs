@@ -5,6 +5,8 @@
 //! scaling of the internal union framebuffer.
 
 pub mod procstat;
+pub mod sampler;
+pub mod load;
 #[cfg(target_os = "linux")]
 pub mod plasma;
 #[cfg(target_os = "linux")]
@@ -835,6 +837,11 @@ struct Timing {
     wildlife_ms: f64,
     sim_step: f64,
     rest: f64,
+    /// B101: the main thread's CPU (not wall) time per phase, ms per frame.
+    cpu_loop: f64,
+    cpu_dispatch: f64,
+    cpu_animate: f64,
+    cpu_render: f64,
     /// B61f: the same three costs on the frames that composited the whole
     /// frame (a shadow crossfade, a re-tint band, a new sky). A full frame is
     /// the one that can overrun the 33 ms budget, so it gets its own row.
@@ -858,6 +865,7 @@ impl Timing {
         }
         self.n += 1;
         if self.n % 60 == 0 {
+            render::report_pass_times(self.n as usize);
             let n = self.n as f64;
             eprintln!(
                 "timing (mean of {} frames, ms): composite {:.3} flush {:.3} clouds {:.3} weather {:.3} meteor {:.3} hash {:.3} present {:.3} export {:.3} | animate {:.3} (people {:.3} traffic {:.3} movers {:.3} water {:.3} wildlife {:.3}) sim {:.3}",
@@ -879,6 +887,17 @@ impl Timing {
                 self.sim_step / n
             );
             eprintln!("timing: rest (loop) {:.3} ms", self.rest / n);
+            eprintln!(
+                "timing: thread cpu per frame (ms): loop {:.3} = dispatch {:.3} + animate {:.3} + render {:.3}",
+                self.cpu_loop / n,
+                self.cpu_dispatch / n,
+                self.cpu_animate / n,
+                self.cpu_render / n
+            );
+            self.cpu_loop = 0.0;
+            self.cpu_dispatch = 0.0;
+            self.cpu_animate = 0.0;
+            self.cpu_render = 0.0;
             if self.full_n > 0 {
                 let f = self.full_n as f64;
                 eprintln!(
@@ -915,6 +934,21 @@ impl Timing {
     }
 }
 
+/// B101: this thread's CPU time so far, in ms (zero off Linux).
+fn thread_cpu_ms() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a plain clock read into a stack timespec.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        ts.tv_sec as f64 * 1e3 + ts.tv_nsec as f64 / 1e6
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0.0
+    }
+}
+
 struct FrameTotals {
     frames: u64,
     sim: Duration,
@@ -944,6 +978,19 @@ struct StatsCollector {
     /// B42d: bytes written to the frame directory since the last report.
     since_export: u64,
     total_export: u64,
+    /// B101: every committed frame's composite time (ms), for the percentiles
+    /// the budget is stated in (a mean hides the frames that miss).
+    win_comp: Vec<f32>,
+    all_comp: Vec<f32>,
+}
+
+/// The `q`-quantile (0..1) of `v` (sorted in place), or 0.
+fn quantile(v: &mut [f32], q: f32) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    v[((v.len() - 1) as f32 * q).round() as usize]
 }
 
 impl StatsCollector {
@@ -980,7 +1027,15 @@ impl StatsCollector {
             total_ticks: 0,
             since_export: 0,
             total_export: 0,
+            win_comp: Vec::new(),
+            all_comp: Vec::new(),
         }
+    }
+
+    /// B101: the composite's p50, p99 and worst frame over the whole run.
+    fn comp_percentiles(&self) -> (f32, f32, f32) {
+        let mut v = self.all_comp.clone();
+        (quantile(&mut v, 0.5), quantile(&mut v, 0.99), quantile(&mut v, 1.0))
     }
 
     /// B42d: how many bytes the plugin export actually wrote (the number that
@@ -1014,6 +1069,11 @@ impl StatsCollector {
         self.since_report.comp += comp;
         self.since_report.present += present;
 
+        if self.enabled {
+            let ms = comp.as_secs_f32() * 1e3;
+            self.win_comp.push(ms);
+            self.all_comp.push(ms);
+        }
         self.total.frames += 1;
         self.total.sim += sim;
         self.total.comp += comp;
@@ -1057,6 +1117,17 @@ impl StatsCollector {
                 rss,
                 export
             );
+            if !self.win_comp.is_empty() {
+                let mut v = std::mem::take(&mut self.win_comp);
+                println!(
+                    "         composite p50 {:.2} p99 {:.2} max {:.2} ms",
+                    quantile(&mut v, 0.5),
+                    quantile(&mut v, 0.99),
+                    quantile(&mut v, 1.0)
+                );
+                v.clear();
+                self.win_comp = v;
+            }
             if self.since_report.rects > 0 {
                 let wr = self.since_report.comp_max_rect;
                 println!(
@@ -1284,6 +1355,13 @@ pub struct WallpaperState {
     pub sky_floor: i32,
     /// The water animation phase in old frames (B21 item 3, D71: fractional).
     pub water_frame: f32,
+    /// B101: the load governor (thins water, clouds and far movers when frames
+    /// keep missing their deadline) and the time each thinned class has not
+    /// yet been stepped for.
+    pub load: load::Governor,
+    water_dt: f32,
+    cloud_dt: f32,
+    mover_dt: f32,
     pub last_sim_step: Instant,
     pub last_save_time: Instant,
     /// B37: the settings file's modification time when it was last read, the
@@ -1479,6 +1557,10 @@ impl WallpaperState {
             live_sky_state: None,
             sky_floor: 0,
             water_frame: 0.0,
+            load: load::Governor::default(),
+            water_dt: 0.0,
+            cloud_dt: 0.0,
+            mover_dt: 0.0,
             last_sim_step: now,
             last_save_time: now,
             settings_mtime: None,
@@ -1497,7 +1579,10 @@ impl WallpaperState {
             hidden: false,
             stats_collector: StatsCollector::new(stats_enabled),
             timing: Timing {
-                on: std::env::var("CITYLIVE_TIMING").is_ok(),
+                on: {
+                    render::pass_time_enable_from_env();
+                    std::env::var("CITYLIVE_TIMING").is_ok()
+                },
                 ..Timing::default()
             },
             last_sky: Instant::now() - Duration::from_secs(3600),
@@ -3392,6 +3477,16 @@ impl WallpaperState {
     fn animate(&mut self, dt: f32) -> bool {
         let before = self.scene.pending_len();
         let ta = Instant::now();
+        // B101: under load some classes are stepped every n-th tick with the
+        // time they missed (their motion is a function of time, so it jumps
+        // instead of slowing down).
+        self.load.next_tick();
+        let div = self.load.divisors();
+        self.water_dt += dt;
+        self.cloud_dt += dt;
+        self.mover_dt += dt;
+        let movers_due = self.load.due(div.movers);
+        let mover_dt = if movers_due { std::mem::take(&mut self.mover_dt) } else { 0.0 };
 
         // 0. B50: the world's ending, if it is on.
         self.ending_tick();
@@ -3428,7 +3523,7 @@ impl WallpaperState {
         // 3. The residents (B43/D65): everybody doing something, at true
         //    scale, every resident who is out, gliding rather than stepping.
         let tp = Instant::now();
-        {
+        if movers_due {
             let mut t = 0.0;
             if let Some(s) = &self.sim {
                 t = s.smooth_time();
@@ -3477,9 +3572,9 @@ impl WallpaperState {
         // 4. Water: the phase is fractional now, so ripples scroll at the
         //    display rate instead of stepping six times a second.
         let tw = Instant::now();
-        if self.config.water_anim {
+        if self.config.water_anim && self.load.due(div.water) {
             self.water_frame = (self.water_frame
-                + dt * render::terrain::WATER_PHASE_HZ)
+                + std::mem::take(&mut self.water_dt) * render::terrain::WATER_PHASE_HZ)
                 % render::terrain::WATER_PHASE;
             self.scene.animate_water(self.water_frame);
         }
@@ -3491,8 +3586,8 @@ impl WallpaperState {
         //     Nothing called this from the wallpaper, so the cloud shadows stood
         //     still until something else forced a full frame.
         let tc = Instant::now();
-        if self.scene.clouds_live() {
-            self.scene.cloud_tick(dt);
+        if self.scene.clouds_live() && self.load.due(div.clouds) {
+            self.scene.cloud_tick(std::mem::take(&mut self.cloud_dt));
         }
         let d = tc.elapsed();
         self.timing.hit(|t| &mut t.clouds, d);
@@ -3508,9 +3603,9 @@ impl WallpaperState {
 
         // 5. Traffic. The vehicles are posed by the sim, stepped by real time.
         let tt = Instant::now();
-        if self.config.traffic {
+        if self.config.traffic && movers_due {
             if let Some(sim) = &mut self.sim {
-                sim.traffic_step(dt as f64);
+                sim.traffic_step(mover_dt as f64);
             }
             let mut bodies = self.traffic_bodies();
             // B62/D68: and fewer cars while he is away.
@@ -3558,15 +3653,17 @@ impl WallpaperState {
 
         // 6. Rail, trams, boats, ships and planes (B31b).
         let tm = Instant::now();
-        if let Some(sim) = &mut self.sim {
-            sim.transport_step(dt as f64);
+        if movers_due {
+            if let Some(sim) = &mut self.sim {
+                sim.transport_step(mover_dt as f64);
+            }
+            let fx = self.sim_fixtures();
+            self.scene.set_fixtures(fx);
+            let movers = self.mover_bodies();
+            self.scene.set_movers(movers);
+            let shown = self.scene.movers_shown_count();
+            self.movers_shown = shown;
         }
-        let fx = self.sim_fixtures();
-        self.scene.set_fixtures(fx);
-        let movers = self.mover_bodies();
-        self.scene.set_movers(movers);
-        let shown = self.scene.movers_shown_count();
-        self.movers_shown = shown;
         let d = tm.elapsed();
         self.timing.hit(|t| &mut t.movers, d);
 
@@ -3997,6 +4094,34 @@ impl WallpaperState {
                             }
                         }
                     }
+                }
+                if diff > 0 {
+                    // Where: a coarse map (128x64 cells), the dearest eight.
+                    let mut cells: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+                    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                        if x != y && i / w >= top {
+                            *cells.entry(((i % w) / 128, (i / w) / 64)).or_default() += 1;
+                        }
+                    }
+                    let mut v: Vec<_> = cells.into_iter().collect();
+                    v.sort_by(|p, q| q.1.cmp(&p.1));
+                    if let Ok(c) = std::env::var("VERIFY_CELL") {
+                        let p: Vec<usize> = c.split(',').filter_map(|v| v.parse().ok()).collect();
+                        if p.len() == 2 {
+                            let mut shown = 0;
+                            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                                if x != y && i / w >= top && (i % w) / 128 == p[0] && (i / w) / 64 == p[1] && shown < 12 {
+                                    eprintln!("verify px ({}, {}) incremental {:08x} full {:08x}", i % w, i / w, x, y);
+                                    shown += 1;
+                                }
+                            }
+                        }
+                    }
+                    v.truncate(60);
+                    eprintln!(
+                        "verify where (x/128,y/64 -> px): {}",
+                        v.iter().map(|((cx, cy), n)| format!("({cx},{cy})={n}")).collect::<Vec<_>>().join(" ")
+                    );
                 }
                 eprintln!(
                     "verify: {diff} px differ on the land, {sky} in the sky band (first {first:?}, {} damage rects) {samples:?}",
@@ -4846,6 +4971,8 @@ pub fn run_loop(
     let started = Instant::now();
     let mut next_frame_time = Instant::now();
     // B84: `CITYLIVE_MEM=1` also prints the table every 10 s (a steady reading).
+    let sampler_path = sampler::path_from_env();
+    let mut sampler_armed = false;
     let mem_every: f64 = if std::env::var("CITYLIVE_MEM").is_ok() {
         10.0
     } else {
@@ -4870,6 +4997,11 @@ pub fn run_loop(
 
     loop {
         let t_loop = Instant::now();
+        if sampler_path.is_some() && !sampler_armed && state.started_at.elapsed() > Duration::from_secs(20) {
+            sampler_armed = true;
+            sampler::arm();
+        }
+        let c_loop = thread_cpu_ms();
         if TERMINATING.load(Ordering::Relaxed) {
             break;
         }
@@ -5315,6 +5447,11 @@ pub fn run_loop(
         }
 
         let frame_due = now >= next_frame_time;
+        // B101: how late this frame starts, and when its work began, for the
+        // load governor.
+        let frame_late = now.saturating_duration_since(next_frame_time);
+        let frame_t0 = Instant::now();
+        let mut frame_worked = false;
 
         // D71/B54: one animation step for everything that moves, at the
         // configured frame rate, with the same real `dt` for every layer — so
@@ -5326,8 +5463,12 @@ pub fn run_loop(
                 .as_secs_f32()
                 .clamp(0.0, 0.25);
             state.last_anim = now;
+            frame_worked = true;
             let t_an = Instant::now();
-            if state.animate(dt) {
+            let c_an = thread_cpu_ms();
+            let animated = state.animate(dt);
+            state.timing.cpu_animate += thread_cpu_ms() - c_an;
+            if animated {
                 state.needs_composite = true;
             }
             stall("animate", t_an);
@@ -5367,9 +5508,24 @@ pub fn run_loop(
 
         if should_render {
             let t_rp = Instant::now();
+            let c_rp = thread_cpu_ms();
             state.render_and_present();
+            state.timing.cpu_render += thread_cpu_ms() - c_rp;
             stall("render_and_present", t_rp);
             flush();
+        }
+        if frame_worked && !state.hidden && state.config.fps > 0 && state.started_at.elapsed() > Duration::from_secs(12) {
+            let busy = frame_t0.elapsed();
+            if let Some((from, to)) = state.load.frame(busy, frame_late, frame_interval) {
+                eprintln!(
+                    "load: frames are missing their deadline ({:.1} ms of work, {:.1} ms late): level {} -> {} ({})",
+                    busy.as_secs_f64() * 1e3,
+                    frame_late.as_secs_f64() * 1e3,
+                    from,
+                    to,
+                    state.load.describe()
+                );
+            }
         }
 
         // Sleep until the next thing that can change a pixel (B26c item 4):
@@ -5419,7 +5575,10 @@ pub fn run_loop(
         } else {
             timeout
         };
-        if let Err(e) = dispatch(&mut state, timeout) {
+        let c_dp = thread_cpu_ms();
+        let dispatched = dispatch(&mut state, timeout);
+        state.timing.cpu_dispatch += thread_cpu_ms() - c_dp;
+        if let Err(e) = dispatched {
             if TERMINATING.load(Ordering::Relaxed) {
                 break;
             }
@@ -5428,6 +5587,7 @@ pub fn run_loop(
 
         let d = t_loop.elapsed();
         state.timing.hit(|t| &mut t.rest, d);
+        state.timing.cpu_loop += thread_cpu_ms() - c_loop;
         state.stats_collector.maybe_report();
         // B84: with `CITYLIVE_MEM=1`, the memory table is printed every 10 s as
         // well as at start and exit, so a reading is the *steady* footprint and
@@ -5453,6 +5613,7 @@ pub fn run_loop(
         }
     }
 
+    sampler::dump(&sampler_path);
     let stats = state.stats_collector.finish();
     if std::env::var("CITYLIVE_MEM").is_ok() {
         state.print_mem_report();
@@ -5478,6 +5639,8 @@ pub fn run_loop(
             stats.avg_comp_ms,
             stats.avg_present_ms
         );
+        let (p50, p99, max) = state.stats_collector.comp_percentiles();
+        println!("COMPOSITE p50={p50:.2} p99={p99:.2} max={max:.2} ms over {} frames", state.stats_collector.all_comp.len());
     }
 
     Ok(stats)

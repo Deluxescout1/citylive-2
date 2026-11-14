@@ -86,6 +86,7 @@ fn off() -> bool {
 
 /// The sprite rows and columns the ground floor occupies: the band a tag, a
 /// shutter or a board can live in without landing on the roof.
+#[derive(Clone, Copy)]
 struct Band {
     y0: i32,
     y1: i32,
@@ -95,7 +96,37 @@ struct Band {
     top: i32,
 }
 
+/// The band of a sprite, found once: a lot painted in column slices (B100) asks
+/// for it once per slice, and the scan reads the whole sprite.
 fn band_of(k: &KitSprite) -> Option<Band> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static BANDS: RefCell<HashMap<usize, Option<Band>>> = RefCell::new(HashMap::new());
+    }
+    // Keyed by the pixels' address and a fingerprint of the sprite, so a new
+    // sprite that lands at a freed one's address is not given its band.
+    let mut fp = (k.w as u64) << 32 ^ (k.h as u64) << 16 ^ (k.oy as u64);
+    let step = (k.px.len() / 61).max(1);
+    for i in (0..k.px.len()).step_by(step) {
+        fp = fp.wrapping_mul(0x100_0000_01b3) ^ k.px[i] as u64;
+    }
+    let key = (std::sync::Arc::as_ptr(&k.px) as usize) ^ (fp as usize).rotate_left(17);
+    if let Some(b) = BANDS.with(|m| m.borrow().get(&key).copied()) {
+        return b;
+    }
+    let b = scan_band(k);
+    BANDS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 8192 {
+            m.clear();
+        }
+        m.insert(key, b);
+    });
+    b
+}
+
+fn scan_band(k: &KitSprite) -> Option<Band> {
     let mut top = -1i32;
     let mut bot = -1i32;
     for sy in 0..k.h {
@@ -174,10 +205,15 @@ fn grime(fb: &mut Framebuffer, o: &CityObj, k: &KitSprite, x: i32, y: i32, band:
     // Coherent patches, never per-pixel noise: at 1x a wall is 20-40 px tall, so
     // grime has to arrive in blocks and columns a person can read as dirt.
     const CHALK: Color = rgb(0xc4, 0xc0, 0xb4);
-    for sy in 0..k.h {
+    // Only the part of the sprite inside the clip: a lot painted in column
+    // slices (B100) calls this once per slice.
+    let clip = fb.clip();
+    let (sx0, sx1) = ((clip.x0 - x).max(0) as usize, (clip.x1 - x).clamp(0, k.w as i32) as usize);
+    let (sy0, sy1) = ((clip.y0 - y).max(0) as usize, (clip.y1 - y).clamp(0, k.h as i32) as usize);
+    for sy in sy0..sy1 {
         let fy = y + sy as i32;
         let srow = sy * k.w;
-        for sx in 0..k.w {
+        for sx in sx0..sx1 {
             let c = k.px[srow + sx];
             if !opaque(c) || emissive(c) {
                 continue;

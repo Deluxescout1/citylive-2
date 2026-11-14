@@ -25,6 +25,56 @@ pub use lots::{CacheReport, KitCache, light_for, set_city, set_city_in, set_city
 /// (`out.depth`) for the engine's depth mask, and the anchor point (`out.ox`, `out.oy`) corresponding
 /// to the footprint's tile origin (0, 0, 0).
 pub fn draw(spec: &BuildingSpec, light: &Light, out: &mut Sprite) {
+    // B100: a building stands inside its own lot. Whatever it draws at ground
+    // level (walls, porch, paving) must not reach past the lot's diamond, or
+    // it shares ground with its neighbour and no painter's order can be right.
+    // Hand-made art and the odd generated plan overshoot by a few pixels, so
+    // the plan is pulled in about the lot's centre until it fits (offenders
+    // only: most sprites pass the first check).
+    let (lw, lh) = (spec.footprint.0.max(1) as i32, spec.footprint.1.max(1) as i32);
+    draw_scaled(spec, light, out);
+    if fit_off() {
+        return;
+    }
+    let over = |s: &Sprite| ground_overhang(s, lw, lh);
+    let mut k = 1.0f32;
+    let mut o = over(out);
+    for _ in 0..FIT_STEPS {
+        if o <= FIT_TOLERANCE_PX {
+            break;
+        }
+        // Pull in by (about) the excess, as a share of the lot's half-width.
+        let half = 32.0 * (lw.max(lh) as f32) * 0.5;
+        k = (k - (o as f32 / half).max(0.03)).max(0.6);
+        geom::with_fit(lw as f32 * 0.5, lh as f32 * 0.5, k, || draw_scaled(spec, light, out));
+        // Pulling the plan in resamples every edge: close the pinholes that
+        // leaves in a hand-made silhouette (the generator does its own).
+        genkit::building::close_pinpricks(out);
+        o = over(out);
+        if k <= 0.6 {
+            break;
+        }
+    }
+}
+
+/// Ground-level pixels tolerated past the lot's diamond.
+pub const FIT_TOLERANCE_PX: i32 = 1;
+const FIT_STEPS: usize = 8;
+/// What counts as ground level, in pixels of height.
+pub const GROUND_PX: u16 = 10;
+
+fn fit_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("CITYLIVE_NO_FIT").is_ok())
+}
+
+/// How far the ground-level pixels of `s` reach past an `lw` x `lh` lot (see
+/// `render::scene::lot_overhang`).
+pub fn ground_overhang(s: &Sprite, lw: i32, lh: i32) -> i32 {
+    render::scene::lot_overhang(s.w, s.h, s.ox, s.oy, lw, lh, |i| (s.px[i] >> 24) >= 0x80 && s.depth[i] <= GROUND_PX)
+}
+
+fn draw_scaled(spec: &BuildingSpec, light: &Light, out: &mut Sprite) {
     let (fw, fh) = (
         spec.footprint.0.max(1) as f32,
         spec.footprint.1.max(1) as f32,

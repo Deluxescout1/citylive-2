@@ -19,3 +19,6 @@ First public release.
 - Automatic updates: the program looks at the GitHub releases at start and every six hours, downloads a newer
   version in the background, checks it against the release's `SHA256SUMS`, and installs it the next time it starts.
   It can be turned off in the settings.
+- Light on the machine: a load governor lowers the frame rate and detail while the computer is busy, and drawing a
+  frame at 7040x1440 takes about 5 ms.
+- Buildings sit on their lots and draw in the right order, so nothing in front is hidden behind something farther back.

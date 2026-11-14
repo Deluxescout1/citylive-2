@@ -199,6 +199,10 @@ pub struct Framebuffer {
     /// pass draws the same walls in the same places, so its records would be a
     /// duplicate set to be paid for and thrown away (8 ms of the frame budget).
     pub record_windows: bool,
+    /// B100: the painter diagonal a column slice of a city object paints at,
+    /// for engine art that stamps its own depth keys (`i32::MIN` = none, use
+    /// the object's far corner).
+    slice_diag: i32,
 }
 
 /// Tag for a *prop* (a tree, a bush, a stone): never hazed, and allowed to rise
@@ -222,6 +226,7 @@ impl Framebuffer {
             clip: Rect::from_size(w, h),
             depth: None,
             depth_key: 0,
+            slice_diag: i32::MIN,
             origin: (0, 0),
             solid: 0,
             windows: Vec::new(),
@@ -304,6 +309,18 @@ impl Framebuffer {
     }
 
     /// Key stamped into the depth plane by every subsequent draw.
+    #[inline]
+    pub fn set_slice_diag(&mut self, d: Option<i32>) {
+        self.slice_diag = d.unwrap_or(i32::MIN);
+    }
+
+    /// The diagonal engine art should key itself with: the slice's, if a
+    /// column slice is being painted, else `own`.
+    #[inline]
+    pub fn slice_diag_or(&self, own: i32) -> i32 {
+        if self.slice_diag == i32::MIN { own } else { self.slice_diag }
+    }
+
     #[inline]
     pub fn set_depth_key(&mut self, key: u16) {
         self.depth_key = key;

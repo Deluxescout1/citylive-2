@@ -597,6 +597,16 @@ fn generated_type(function: BuildingFunction) -> crate::BuildingType {
 
 /// The buildkit spec for a lot, or `None` when the engine's own art should draw
 /// it (parks, construction sites, barns).
+/// One of the hand-made signature towers, if one is drawn for a footprint that
+/// fits this lot (B100): the art is made for its own plan (1x1 or 1x2) and
+/// stands wherever that plan fits; on a smaller or turned lot it would reach
+/// into the neighbour's ground, so the lot gets a generated tower instead.
+fn signature_tower(h: u32, o: &CityObj) -> Option<crate::BuildingType> {
+    let bt = crate::BuildingType::TOWERS_16[(h / 14) as usize % 16];
+    let (fw, fh) = bt.default_spec(0, 0).footprint;
+    (fw as i32 <= o.w && fh as i32 <= o.h).then_some(bt)
+}
+
 pub fn spec_for(o: &CityObj) -> Option<BuildingSpec> {
     // B35: tall buildings and landmarks go up through the kit's construction
     // stages (excavation, foundation, framing with a tower crane, cladding);
@@ -747,7 +757,7 @@ pub fn spec_for(o: &CityObj) -> Option<BuildingSpec> {
         if is_tower {
             let h = crate::color::hash_seed(o.seed as u64, 0x51);
             if h % 14 == 0 {
-                Some(crate::BuildingType::TOWERS_16[(h / 14) as usize % 16])
+                signature_tower(h, o)
             } else {
                 None
             }
@@ -765,7 +775,7 @@ pub fn spec_for(o: &CityObj) -> Option<BuildingSpec> {
     } else if is_tower {
         let h = crate::color::hash_seed(o.seed as u64, 0x51);
         if h % 14 == 0 {
-            Some(crate::BuildingType::TOWERS_16[(h / 14) as usize % 16])
+            signature_tower(h, o)
         } else {
             None
         }

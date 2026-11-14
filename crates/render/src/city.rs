@@ -473,7 +473,7 @@ impl CityObj {
         // B65: the yard is *ground* — a figure standing on it must be drawn
         // over it (B43) — while the walls below are a solid: the depth key
         // moves up a step before they are drawn.
-        fb.set_depth_key(crate::actors::static_key(self.diagonal(), false));
+        fb.set_depth_key(crate::actors::static_key(fb.slice_diag_or(self.diagonal()), false));
         // --- the yard: grass, a little darker than open ground, and a path ---
         if site_geo.is_none() && !matches!(self.stage, Stage::Staked) && self.kind != ObjKind::Barn {
             let yard = [
@@ -506,7 +506,7 @@ impl CityObj {
         }
 
         // Everything from here up stands: the walls, the roof, the lamps.
-        fb.set_depth_key(crate::actors::static_key(self.diagonal(), true));
+        fb.set_depth_key(crate::actors::static_key(fb.slice_diag_or(self.diagonal()), true));
         // B38: night light on the civic spaces and the houses.
         match self.kind {
             ObjKind::Landmark(LandmarkKind::Plaza) | ObjKind::Park => {

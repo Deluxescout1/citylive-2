@@ -7,6 +7,7 @@ mod args;
 mod skylight;
 mod spec;
 mod bench;
+mod orderaudit;
 mod pngio;
 mod procstat;
 mod win;
@@ -2768,6 +2769,17 @@ fn run_png_sim(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     stage_civic_env(a, &mut s, a.sim_days);
     attach_city(&mut scene, &s, a.light.as_deref().or(a.time.as_deref()), a.date.as_deref());
+    if std::env::var("CITYLIVE_ORDER_AUDIT").is_ok() {
+        let label = format!(
+            "seed {} {} day {}",
+            a.seed,
+            a.biome.map(|b| b.name()).unwrap_or("auto"),
+            a.sim_days
+        );
+        let r = orderaudit::audit(&scene, &label);
+        orderaudit::print(&label, &r);
+        return Ok(());
+    }
     // B74: a still shows the cars standing in the city's spaces (the kerb rows
     // outside the blocks of flats among them), not only the moving ones.
     scene.set_parked(endfx::kinds::parked_bodies(&s));

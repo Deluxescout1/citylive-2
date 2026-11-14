@@ -1246,7 +1246,7 @@ fn civic(
 
 /// Close single-pixel pinholes inside a drawn silhouette (H32's rule, and the
 /// catalogue's own "no dropout" test).
-fn close_pinpricks(sprite: &mut Sprite) {
+pub(crate) fn close_pinpricks(sprite: &mut Sprite) {
     if sprite.w < 3 || sprite.h < 3 {
         return;
     }

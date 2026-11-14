@@ -378,6 +378,72 @@ pub fn draw_actor_shadow(
     draw_actor_shadow_in(fb, cam, depth, &[], key, x, y, z, hw, hh, height_px, s, test_depth)
 }
 
+/// B101: the pixels `px0..px1` of the row at ground-diagonal `v` that lie in the
+/// swept footprint of a `hw` x `hh` rectangle centred on `(x, y)` moved along
+/// `(ox, oy)`, clipped to `cx0..cx1`; `None` when the row misses it.
+///
+/// In ground coordinates a pixel row is the line `X + Y = v`. Writing `s` for
+/// `v - x - y`, a point on it with offset `r` along X is in the footprint when
+/// some `t` in `0..=1` has `|r - t ox| <= hw` and `|s - r - t oy| <= hh`. Those
+/// bound `t` (so the row can miss) and, for the `t` that are left, bound `r` by
+/// two piecewise-linear functions whose extremes sit at the ends of the `t`
+/// range or at one corner each. Nothing is searched per pixel.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn row_run(
+    x: f32,
+    y: f32,
+    v: f32,
+    ox: f32,
+    oy: f32,
+    hw: f32,
+    hh: f32,
+    cam_ox: f32,
+    cx0: i32,
+    cx1: i32,
+) -> Option<(i32, i32)> {
+    use map::iso_consts::HALF_W;
+    let s = v - x - y;
+    let k = ox + oy;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    if k.abs() < 1e-6 {
+        if s.abs() > hw + hh {
+            return None;
+        }
+    } else {
+        let (a, b) = ((s - hw - hh) / k, (s + hw + hh) / k);
+        t0 = t0.max(a.min(b));
+        t1 = t1.min(a.max(b));
+        if t0 > t1 {
+            return None;
+        }
+    }
+    let lo_at = |t: f32| (t * ox - hw).max(s - t * oy - hh);
+    let hi_at = |t: f32| (t * ox + hw).min(s - t * oy + hh);
+    let (mut lo, mut hi) = (lo_at(t0).min(lo_at(t1)), hi_at(t0).max(hi_at(t1)));
+    if k.abs() >= 1e-6 {
+        // Where the two lower (and the two upper) bounds cross.
+        let tl = (s - hh + hw) / k;
+        if tl > t0 && tl < t1 {
+            lo = lo.min(lo_at(tl));
+        }
+        let tu = (s + hh - hw) / k;
+        if tu > t0 && tu < t1 {
+            hi = hi.max(hi_at(tu));
+        }
+    }
+    if lo > hi {
+        return None;
+    }
+    // u = X - Y = 2r + (x - y - s); pixel centre px + 0.5 sits at u * HALF_W + cam_ox.
+    let base = x - y - s;
+    let e = 1e-3;
+    let a = (((2.0 * lo + base) * HALF_W as f32 + cam_ox - 0.5) - e).ceil() as i32;
+    let b = (((2.0 * hi + base) * HALF_W as f32 + cam_ox - 0.5) + e).floor() as i32 + 1;
+    let (a, b) = (a.max(cx0), b.min(cx1));
+    (a < b).then_some((a, b))
+}
+
 /// As [`draw_actor_shadow`], with the frame's static shadow plane so a figure
 /// standing in a wall's shade is not darkened twice.
 #[allow(clippy::too_many_arguments)]
@@ -419,28 +485,18 @@ pub fn draw_actor_shadow_in(
     if clip.is_empty() {
         return bounds;
     }
-    // The t-interval over which `q - t*o` stays within `h` of zero, for one axis.
-    let span = |q: f32, o: f32, h: f32| -> (f32, f32) {
-        if o.abs() < 1e-5 {
-            if q.abs() <= h { (0.0, 1.0) } else { (1.0, 0.0) }
-        } else {
-            let (a, b) = ((q - h) / o, (q + h) / o);
-            (a.min(b).max(0.0), a.max(b).min(1.0))
-        }
-    };
     SCRATCH.with(|sc| {
         let mut hit = sc.borrow_mut();
         hit.clear();
         for py in clip.y0..clip.y1 {
             let v = (py as f32 + 0.5 - cam.oy as f32 + z as f32) / HALF_H as f32;
-            for px in clip.x0..clip.x1 {
-                let u = (px as f32 + 0.5 - cam.ox as f32) / HALF_W as f32;
-                let (tx, ty) = ((u + v) * 0.5 - x, (v - u) * 0.5 - y);
-                let (a0, a1) = span(tx, ox, hw);
-                let (b0, b1) = span(ty, oy, hh);
-                if a0.max(b0) > a1.min(b1) {
-                    continue;
-                }
+            // B101: the swept footprint is a convex hexagon on the ground, so a
+            // pixel row (a diagonal line on the ground) crosses it in one run;
+            // find the run instead of testing every pixel of the box.
+            let Some((px0, px1)) = row_run(x, y, v, ox, oy, hw, hh, cam.ox as f32, clip.x0, clip.x1) else {
+                continue;
+            };
+            for px in px0..px1 {
                 let i = py as usize * fb.w + px as usize;
                 if test_depth && !depth.is_empty() {
                     // Ground never hides a shadow (its own painter key changes
@@ -486,6 +542,57 @@ pub fn draw_actor_shadow_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B101: the per-row run finds the same pixels as testing every pixel of the
+    /// box with the swept-footprint inequalities (the way it used to be done).
+    #[test]
+    fn the_row_run_matches_the_per_pixel_test() {
+        use map::iso_consts::{HALF_H, HALF_W};
+        let mut seed = 0x1234_5678u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let mut worst = 0usize;
+        let mut total = 0usize;
+        for _ in 0..4000 {
+            let (x, y) = (20.0 + rnd() * 40.0, 20.0 + rnd() * 40.0);
+            let (hw, hh) = (0.01 + rnd() * 0.4, 0.01 + rnd() * 0.4);
+            let (ox, oy) = ((rnd() - 0.5) * 3.0, (rnd() - 0.5) * 3.0);
+            let (cam_ox, cam_oy, z) = (3000.0 + rnd() * 10.0, 200.0 + rnd() * 10.0, (rnd() * 40.0) as i32);
+            let span = |q: f32, o: f32, h: f32| -> (f32, f32) {
+                if o.abs() < 1e-5 {
+                    if q.abs() <= h { (0.0, 1.0) } else { (1.0, 0.0) }
+                } else {
+                    let (a, b) = ((q - h) / o, (q + h) / o);
+                    (a.min(b).max(0.0), a.max(b).min(1.0))
+                }
+            };
+            // The screen box of the footprint.
+            let (px_lo, px_hi) = (((x - y) * HALF_W as f32 + cam_ox) as i32 - 120, ((x - y) * HALF_W as f32 + cam_ox) as i32 + 120);
+            let cy = ((x + y) * HALF_H as f32 + cam_oy - z as f32) as i32;
+            for py in (cy - 80)..(cy + 80) {
+                let v = (py as f32 + 0.5 - cam_oy + z as f32) / HALF_H as f32;
+                let run = row_run(x, y, v, ox, oy, hw, hh, cam_ox, px_lo, px_hi);
+                for px in px_lo..px_hi {
+                    let u = (px as f32 + 0.5 - cam_ox) / HALF_W as f32;
+                    let (tx, ty) = ((u + v) * 0.5 - x, (v - u) * 0.5 - y);
+                    let (a0, a1) = span(tx, ox, hw);
+                    let (b0, b1) = span(ty, oy, hh);
+                    let brute = a0.max(b0) <= a1.min(b1);
+                    let fast = run.is_some_and(|(a, b)| px >= a && px < b);
+                    total += brute as usize;
+                    if brute != fast {
+                        worst += 1;
+                    }
+                }
+            }
+        }
+        // Only razor-edge pixels (inside the 1e-3 slack) may differ.
+        assert!(worst * 5000 <= total, "{worst} of {total} pixels differ");
+    }
 
     /// The azimuth → ground direction map has to agree with the sky band:
     /// south (180°) is the far edge (up-screen), east (90°) is screen left.
